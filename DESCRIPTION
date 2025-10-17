@@ -2,17 +2,12 @@ Package: treeExtension
 Type: Package
 Title: Lightweight Tree Utilities for IQ-TREE Newick Outputs
 Version: 0.1.0
-Authors@R: c(
-    person(given = "Your", family = "Name", role = c("aut", "cre"),
-           email = "your.email@example.com")
-)
-Description: Minimal, dependency-free helpers for IQ-TREE newick strings. 
-    Currently provides make_binary_iqtree(): converts an unrooted, possibly
-    multifurcating tree into a rooted binary tree by splitting the outgroup
-    branch length equally between the outgroup and ingroup sides.
+Authors@R: person("Chen", "Yanpeng", email = "yanpengch@qq.com", role = c("aut", "cre"))
+Description: Dependency-free helpers for IQ-TREE Newick strings. Provides
+    make_binary_iqtree() to convert an unrooted tree into a rooted binary tree
+    by splitting the outgroup pendant branch length equally (L/2 + L/2).
 License: MIT + file LICENSE
 Encoding: UTF-8
-LazyData: true
 Roxygen: list(markdown = TRUE)
 RoxygenNote: 7.3.2
 Depends: R (>= 3.5)
