@@ -120,7 +120,7 @@ make_binary_iqtree <- function(iqtree_treefile, outgroup_label, digits = NULL) {
 
   ## --------------------------- 4) Build new rooted tree -----------------------
   half <- fmt_half(L)
-  newick <- paste0("(", ingroup_txt, ",", outgroup_label, ":", half, "):", half, ";")
+  newick <- paste0("(", ingroup_txt, ":", half, outgroup_label, ":", half, ");")
 
   ## --------------------------- 5) Write output --------------------------------
   outfp <- sub("\\.treefile$", ".bi.treefile", iqtree_treefile)
