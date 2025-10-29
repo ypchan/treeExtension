@@ -1,15 +1,27 @@
 Package: treeExtension
 Type: Package
-Title: Lightweight Tree Utilities for IQ-TREE Newick Outputs
+Title: Lightweight Utilities for IQ-TREE Outputs
 Version: 0.1.0
-Authors@R: person("Chen", "Yanpeng", email = "yanpengch@qq.com", role = c("aut", "cre"))
-Description: Dependency-free helpers for IQ-TREE Newick strings. Provides
-    make_binary_iqtree() to convert an unrooted tree into a rooted binary tree
-    by splitting the outgroup pendant branch length equally (L/2 + L/2).
+Authors@R: 
+    person("Chen", "Yanpeng", email = "yanpengch@qq.com", role = c("aut", "cre"))
+Description: Utilities for working with IQ-TREE outputs and BLAST tabular 
+    results. Includes 'make_binary_iqtree()' to convert an unrooted tree into a
+    rooted binary tree by splitting the outgroup pendant branch length equally
+    (L/2 + L/2), and 'map_blastn_2_iqtree()' to summarize within-node pairwise
+    identities (pident) from BLASTN outfmt 6 files on internal nodes.
 License: MIT + file LICENSE
 Encoding: UTF-8
-Roxygen: list(markdown = TRUE)
-RoxygenNote: 7.3.2
 Depends: R (>= 3.5)
-Suggests: testthat (>= 3.0.0)
+Imports:
+    ggtree,
+    ggplot2,
+    tidytree,
+    treeio,
+    readr,
+    dplyr,
+    tibble
+Suggests:
+    testthat (>= 3.0.0)
 Config/testthat/edition: 3
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.3
