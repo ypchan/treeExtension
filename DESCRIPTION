@@ -1,14 +1,14 @@
 Package: treeExtension
 Type: Package
 Title: Tree Rooting, Monophyly Checks, and Node-Level BLAST Summaries
-Version: 0.2.0
+Version: 0.2.1
 Authors@R:
     person("Chen", "Yanpeng", email = "yanpengch@qq.com", role = c("aut", "cre"))
 Description: Lightweight utilities for working with rooted phylogenetic trees,
     IQ-TREE outputs, and BLAST tabular results. Includes tools to rebuild a
     rooted binary tree from an outgroup branch, assess monophyly at a
-    user-specified taxonomic rank, and summarize BLASTN pairwise similarity
-    statistics across internal tree nodes.
+    user-specified taxonomic rank, build phylum-level constraint trees, and
+    summarize BLASTN pairwise similarity statistics across internal tree nodes.
 License: MIT + file LICENSE
 Encoding: UTF-8
 Depends: R (>= 3.5)

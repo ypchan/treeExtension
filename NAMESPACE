@@ -2,4 +2,5 @@
 
 export(check_rank_monophyly)
 export(make_binary_iqtree)
+export(make_iqtree_phylum_constraint_from_ref_tree)
 export(summarize_blastn_by_node)

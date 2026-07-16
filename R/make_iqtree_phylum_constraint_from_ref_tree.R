@@ -1,400 +1,446 @@
-# ============================================================
-# Build IQ-TREE phylum-level constraint tree from reference tree
-#
-# Purpose:
-#   1. Read query sequence lineage table:
-#        seq_id    lineage
-#
-#   2. Extract phylum for each query sequence.
-#
-#   3. Read a reference phylogenetic tree.
-#      The reference tree can be:
-#        A) species/genus/family/order-level tips + ref_lineage.tsv
-#        B) phylum-level tips directly
-#
-#   4. Inherit phylum-level topology from reference tree.
-#
-#   5. Replace each phylum tip by a polytomy of query seq_id.
-#
-#   6. Output IQ-TREE constraint tree:
-#        constraint.tree
-#
-# Usage in IQ-TREE:
-#   iqtree2 -s aln.fa -m MFP -g constraint.tree -B 1000 -T AUTO --prefix constrained
-#
-# Important:
-#   The final constraint tree tips MUST be seq_id in your alignment.
-#   Taxon names / phylum names are only used to build the backbone.
-# ============================================================
+#' Build an IQ-TREE phylum-level constraint from a reference tree
+#'
+#' @description
+#' Reads query sequence lineages, extracts their phyla, and replaces the
+#' corresponding phylum tips in a reference-tree backbone with query-sequence
+#' clades. Reference-tree tips may either be phylum names or lower-rank taxon
+#' names accompanied by a lineage table.
+#'
+#' All input files are read only when this function is called. Loading or
+#' installing `treeExtension` never changes the working directory or reads
+#' analysis files.
+#'
+#' @param query_lineage_file Path to a tab-separated file containing columns
+#'   `seq_id` and `lineage`.
+#' @param ref_tree_file Path to the reference tree in Newick format.
+#' @param ref_lineage_file Either `NA` when reference-tree tips are phylum
+#'   names, or a path to a tab-separated file containing columns `taxon` and
+#'   `lineage`.
+#' @param out_constraint_tree Output path for the IQ-TREE constraint tree.
+#' @param out_phylum_map Output path for the query sequence-to-phylum table.
+#' @param out_ref_backbone Output path for the reference phylum backbone.
+#' @param out_monophyly_check Output path for the reference phylum monophyly
+#'   report. This file is written only when `ref_lineage_file` is supplied.
+#' @param strict_ref_phylum If `TRUE`, stop when a query phylum is absent from
+#'   the reference data. If `FALSE`, add absent phyla as unresolved root
+#'   clades.
+#' @param verbose If `TRUE`, print progress and summary messages.
+#'
+#' @return Invisibly returns a list containing output paths, a one-row summary,
+#'   the query phylum map, and (when applicable) the monophyly report.
+#'
+#' @examples
+#' \dontrun{
+#' make_iqtree_phylum_constraint_from_ref_tree(
+#'     query_lineage_file = "query_lineage.tsv",
+#'     ref_tree_file = "ref.tree",
+#'     ref_lineage_file = "ref_lineage.tsv"
+#' )
+#'
+#' # Use NA when the reference tree already has phylum-level tips.
+#' make_iqtree_phylum_constraint_from_ref_tree(
+#'     query_lineage_file = "query_lineage.tsv",
+#'     ref_tree_file = "phylum.tree",
+#'     ref_lineage_file = NA
+#' )
+#' }
+#'
+#' @export
+make_iqtree_phylum_constraint_from_ref_tree <- function(
+        query_lineage_file,
+        ref_tree_file,
+        ref_lineage_file = NA_character_,
+        out_constraint_tree = "constraint.tree",
+        out_phylum_map = "query_seqid_phylum.tsv",
+        out_ref_backbone = "reference_phylum_backbone.tree",
+        out_monophyly_check = "reference_phylum_monophyly_check.tsv",
+        strict_ref_phylum = FALSE,
+        verbose = TRUE
+) {
+    .tree_extension_assert_input_file(query_lineage_file, "query_lineage_file")
+    .tree_extension_assert_input_file(ref_tree_file, "ref_tree_file")
 
-library(tidyverse)
-library(ape)
-library(this.path)
-setwd('D:\\BaiduSyncdisk\\SZU\\postdoc\\Pacearchaeales\\part1_phylogenetics\\manuscript_hifi_16s\\supplementary_files\\gtdb232_tree_constraints')
+    if (length(ref_lineage_file) != 1L ||
+        (!is.na(ref_lineage_file) && !is.character(ref_lineage_file))) {
+        stop("`ref_lineage_file` must be one file path or NA.", call. = FALSE)
+    }
+    if (!is.na(ref_lineage_file)) {
+        .tree_extension_assert_input_file(ref_lineage_file, "ref_lineage_file")
+    } else {
+        ref_lineage_file <- NA_character_
+    }
 
-# -----------------------------
-# 1. User parameters
-# -----------------------------
+    output_paths <- list(
+        out_constraint_tree = out_constraint_tree,
+        out_phylum_map = out_phylum_map,
+        out_ref_backbone = out_ref_backbone,
+        out_monophyly_check = out_monophyly_check
+    )
+    invisible(lapply(names(output_paths), function(name) {
+        .tree_extension_assert_output_path(output_paths[[name]], name)
+    }))
 
-query_lineage_file <- "query_lineage.tsv"
-ref_tree_file      <- "ref.tree"
+    if (!is.logical(strict_ref_phylum) ||
+        length(strict_ref_phylum) != 1L || is.na(strict_ref_phylum)) {
+        stop("`strict_ref_phylum` must be TRUE or FALSE.", call. = FALSE)
+    }
+    if (!is.logical(verbose) || length(verbose) != 1L || is.na(verbose)) {
+        stop("`verbose` must be TRUE or FALSE.", call. = FALSE)
+    }
 
-# If reference tree tips are species/genus/family/order names, provide this file.
-# It must contain columns:
-#   taxon    lineage
-#
-# If reference tree tips are already phylum names, set:
-#   ref_lineage_file <- NA
-ref_lineage_file <- "ref_lineage.tsv"
-# ref_lineage_file <- NA
+    inform <- function(...) {
+        if (verbose) {
+            message(...)
+        }
+    }
 
-out_constraint_tree <- "constraint.tree"
-out_phylum_map      <- "query_seqid_phylum.tsv"
-out_ref_backbone    <- "reference_phylum_backbone.tree"
+    query_raw <- readr::read_tsv(query_lineage_file, show_col_types = FALSE)
+    required_query_columns <- c("seq_id", "lineage")
+    missing_query_columns <- setdiff(required_query_columns, names(query_raw))
+    if (length(missing_query_columns) > 0L) {
+        stop(
+            "`query_lineage_file` is missing required columns: ",
+            paste(missing_query_columns, collapse = ", "),
+            call. = FALSE
+        )
+    }
 
-# If TRUE, stop when a query phylum is not found in the reference tree.
-# If FALSE, missing phyla are added as unresolved clades at the root.
-strict_ref_phylum <- FALSE
+    query_tbl <- data.frame(
+        seq_id = as.character(query_raw$seq_id),
+        lineage = as.character(query_raw$lineage),
+        stringsAsFactors = FALSE
+    )
+    query_tbl$phylum <- .tree_extension_extract_phylum(query_tbl$lineage)
+    keep_query <- !is.na(query_tbl$seq_id) & query_tbl$seq_id != "" &
+        !is.na(query_tbl$phylum) & query_tbl$phylum != "" &
+        query_tbl$phylum != "NA"
+    query_tbl <- query_tbl[keep_query, , drop = FALSE]
 
-# -----------------------------
-# 2. Helper functions
-# -----------------------------
+    if (nrow(query_tbl) == 0L) {
+        stop("No valid query sequences with a phylum were found.", call. = FALSE)
+    }
 
-clean_rank_name <- function(x) {
+    duplicated_seq_ids <- unique(query_tbl$seq_id[duplicated(query_tbl$seq_id)])
+    if (length(duplicated_seq_ids) > 0L) {
+        conflicting <- vapply(
+            duplicated_seq_ids,
+            function(id) length(unique(query_tbl$phylum[query_tbl$seq_id == id])) > 1L,
+            logical(1)
+        )
+        if (any(conflicting)) {
+            stop(
+                "Some `seq_id` values map to more than one phylum: ",
+                paste(duplicated_seq_ids[conflicting], collapse = ", "),
+                call. = FALSE
+            )
+        }
+        query_tbl <- query_tbl[!duplicated(query_tbl$seq_id), , drop = FALSE]
+    }
+
+    readr::write_tsv(query_tbl, out_phylum_map)
+
+    seq_by_phylum <- split(query_tbl$seq_id, query_tbl$phylum)
+    query_phyla <- sort(names(seq_by_phylum))
+    phylum_to_seq_clade <- vapply(
+        seq_by_phylum,
+        .tree_extension_make_seq_clade,
+        character(1)
+    )
+
+    inform("[INFO] Query sequences: ", nrow(query_tbl))
+    inform("[INFO] Query phyla: ", paste(query_phyla, collapse = ", "))
+
+    ref_tree <- ape::read.tree(ref_tree_file)
+    if (!inherits(ref_tree, "phylo")) {
+        stop("`ref_tree_file` did not contain one valid phylogenetic tree.", call. = FALSE)
+    }
+    ref_tree <- .tree_extension_strip_edge_length(ref_tree)
+    mono_check <- NULL
+
+    if (is.na(ref_lineage_file)) {
+        inform("[INFO] Reference tree is treated as a phylum-level tree.")
+        ref_tree <- .tree_extension_normalize_tree_tips(ref_tree)
+        ref_phyla <- sort(ref_tree$tip.label)
+        common_phyla <- intersect(query_phyla, ref_phyla)
+        missing_phyla <- setdiff(query_phyla, ref_phyla)
+
+        if (length(common_phyla) == 0L) {
+            stop(
+                "No shared phyla were found between the query data and reference tree.",
+                call. = FALSE
+            )
+        }
+        .tree_extension_handle_missing_phyla(
+            missing_phyla,
+            strict_ref_phylum,
+            "reference tree"
+        )
+
+        phylum_tree <- ape::keep.tip(ref_tree, common_phyla)
+        phylum_tree <- .tree_extension_strip_edge_length(phylum_tree)
+    } else {
+        inform("[INFO] Reference tree is treated as a taxon-level tree.")
+        inform("[INFO] Reference lineage file: ", ref_lineage_file)
+
+        ref_raw <- readr::read_tsv(ref_lineage_file, show_col_types = FALSE)
+        required_ref_columns <- c("taxon", "lineage")
+        missing_ref_columns <- setdiff(required_ref_columns, names(ref_raw))
+        if (length(missing_ref_columns) > 0L) {
+            stop(
+                "`ref_lineage_file` is missing required columns: ",
+                paste(missing_ref_columns, collapse = ", "),
+                call. = FALSE
+            )
+        }
+
+        ref_tax <- data.frame(
+            taxon_raw = as.character(ref_raw$taxon),
+            taxon = .tree_extension_clean_rank_name(ref_raw$taxon),
+            lineage = as.character(ref_raw$lineage),
+            stringsAsFactors = FALSE
+        )
+        ref_tax$phylum <- .tree_extension_extract_phylum(ref_tax$lineage)
+        keep_ref <- !is.na(ref_tax$taxon) & ref_tax$taxon != "" &
+            !is.na(ref_tax$phylum) & ref_tax$phylum != "" &
+            ref_tax$phylum != "NA"
+        ref_tax <- ref_tax[keep_ref, , drop = FALSE]
+
+        ref_tree <- .tree_extension_normalize_tree_tips(ref_tree)
+        ref_tax <- ref_tax[ref_tax$taxon %in% ref_tree$tip.label, , drop = FALSE]
+        if (nrow(ref_tax) == 0L) {
+            stop(
+                "No taxon names in `ref_lineage_file` match the reference-tree tips.",
+                call. = FALSE
+            )
+        }
+
+        common_phyla <- intersect(query_phyla, unique(ref_tax$phylum))
+        missing_phyla <- setdiff(query_phyla, unique(ref_tax$phylum))
+        if (length(common_phyla) == 0L) {
+            stop(
+                "No shared phyla were found between the query data and reference taxonomy.",
+                call. = FALSE
+            )
+        }
+        .tree_extension_handle_missing_phyla(
+            missing_phyla,
+            strict_ref_phylum,
+            "reference taxonomy/tree"
+        )
+
+        mono_rows <- lapply(common_phyla, function(phylum) {
+            tips <- unique(ref_tax$taxon[ref_tax$phylum == phylum])
+            tips <- intersect(tips, ref_tree$tip.label)
+            data.frame(
+                phylum = phylum,
+                n_ref_tips = length(tips),
+                is_monophyletic = if (length(tips) >= 2L) {
+                    ape::is.monophyletic(ref_tree, tips)
+                } else {
+                    NA
+                },
+                stringsAsFactors = FALSE
+            )
+        })
+        mono_check <- do.call(rbind, mono_rows)
+        readr::write_tsv(mono_check, out_monophyly_check)
+
+        bad_mono <- !is.na(mono_check$is_monophyletic) &
+            !mono_check$is_monophyletic
+        if (any(bad_mono)) {
+            warning(
+                "Some phyla are not monophyletic in the reference tree: ",
+                paste(mono_check$phylum[bad_mono], collapse = ", "),
+                ". One representative tip per phylum will be used for the backbone.",
+                call. = FALSE
+            )
+        }
+
+        ref_by_phylum <- split(ref_tax$taxon, ref_tax$phylum)
+        ref_by_phylum <- ref_by_phylum[common_phyla]
+        representative_tip <- vapply(
+            ref_by_phylum,
+            function(tips) sort(unique(tips))[1L],
+            character(1)
+        )
+        rep_tbl <- data.frame(
+            phylum = names(representative_tip),
+            representative_tip = unname(representative_tip),
+            n_ref_tips = vapply(ref_by_phylum, function(x) length(unique(x)), integer(1)),
+            stringsAsFactors = FALSE
+        )
+
+        phylum_tree <- ape::keep.tip(ref_tree, rep_tbl$representative_tip)
+        phylum_tree <- .tree_extension_strip_edge_length(phylum_tree)
+        tip_map <- stats::setNames(rep_tbl$phylum, rep_tbl$representative_tip)
+        phylum_tree$tip.label <- unname(tip_map[phylum_tree$tip.label])
+    }
+
+    ape::write.tree(phylum_tree, file = out_ref_backbone)
+    inform("[DONE] ", out_ref_backbone)
+
+    backbone_phyla <- phylum_tree$tip.label
+    replacement <- phylum_to_seq_clade[backbone_phyla]
+    names(replacement) <- backbone_phyla
+    constraint_body <- .tree_extension_tree_to_newick_body(
+        phylum_tree,
+        replacement = replacement
+    )
+
+    missing_in_backbone <- setdiff(query_phyla, backbone_phyla)
+    if (length(missing_in_backbone) > 0L) {
+        missing_clades <- phylum_to_seq_clade[missing_in_backbone]
+        constraint_body <- paste0(
+            "(", constraint_body, ",",
+            paste(missing_clades, collapse = ","), ")"
+        )
+    }
+
+    constraint_tree <- paste0(constraint_body, ";")
+    writeLines(constraint_tree, out_constraint_tree)
+    inform("[DONE] ", out_constraint_tree)
+
+    summary <- data.frame(
+        query_sequences = nrow(query_tbl),
+        query_phyla = length(query_phyla),
+        backbone_phyla = length(backbone_phyla),
+        missing_phyla_added_at_root = length(missing_in_backbone),
+        stringsAsFactors = FALSE
+    )
+
+    if (verbose) {
+        message(
+            "[SUMMARY] Query sequences: ", summary$query_sequences,
+            "; query phyla: ", summary$query_phyla,
+            "; backbone phyla: ", summary$backbone_phyla,
+            "; missing phyla added at root: ",
+            summary$missing_phyla_added_at_root
+        )
+    }
+
+    invisible(list(
+        paths = c(
+            constraint_tree = out_constraint_tree,
+            phylum_map = out_phylum_map,
+            reference_backbone = out_ref_backbone,
+            monophyly_check = if (is.na(ref_lineage_file)) NA_character_ else out_monophyly_check
+        ),
+        summary = summary,
+        query_phylum_map = tibble::as_tibble(query_tbl),
+        monophyly_check = if (is.null(mono_check)) NULL else tibble::as_tibble(mono_check)
+    ))
+}
+
+.tree_extension_assert_input_file <- function(path, argument) {
+    if (!is.character(path) || length(path) != 1L || is.na(path) || path == "") {
+        stop("`", argument, "` must be one non-empty file path.", call. = FALSE)
+    }
+    if (!file.exists(path)) {
+        stop("File supplied to `", argument, "` does not exist: ", path, call. = FALSE)
+    }
+}
+
+.tree_extension_assert_output_path <- function(path, argument) {
+    if (!is.character(path) || length(path) != 1L || is.na(path) || path == "") {
+        stop("`", argument, "` must be one non-empty file path.", call. = FALSE)
+    }
+}
+
+.tree_extension_clean_rank_name <- function(x) {
+    x <- trimws(as.character(x))
+    x <- sub("^[A-Za-z]__", "", x)
+    gsub("\\s+", "_", x)
+}
+
+.tree_extension_extract_phylum <- function(lineage) {
+    vapply(as.character(lineage), function(value) {
+        if (is.na(value)) {
+            return(NA_character_)
+        }
+        parts <- trimws(strsplit(value, ";", fixed = TRUE)[[1L]])
+        phylum_part <- parts[grepl("^p__", parts)]
+        if (length(phylum_part) > 0L) {
+            return(.tree_extension_clean_rank_name(phylum_part[1L]))
+        }
+        if (length(parts) >= 2L) {
+            return(.tree_extension_clean_rank_name(parts[2L]))
+        }
+        NA_character_
+    }, character(1), USE.NAMES = FALSE)
+}
+
+.tree_extension_quote_newick_label <- function(x) {
     x <- as.character(x)
-    x <- str_trim(x)
-    x <- str_replace(x, "^[a-zA-Z]__", "")
-    x <- str_replace_all(x, "\\s+", "_")
+    safe <- grepl("^[A-Za-z0-9_.|+-]+$", x)
+    x[!safe] <- paste0("'", gsub("'", "''", x[!safe], fixed = TRUE), "'")
     x
 }
 
-extract_phylum <- function(lineage) {
-    lineage <- as.character(lineage)
-    
-    out <- map_chr(lineage, function(x) {
-        parts <- str_split(x, ";", simplify = FALSE)[[1]]
-        parts <- str_trim(parts)
-        
-        # Priority 1: detect p__ prefix
-        p_hit <- parts[str_detect(parts, "^p__")]
-        if (length(p_hit) > 0) {
-            return(clean_rank_name(p_hit[1]))
-        }
-        
-        # Priority 2: use second field as phylum if no p__ prefix
-        # Example: Fungi;Ascomycota;Sordariomycetes
-        if (length(parts) >= 2) {
-            return(clean_rank_name(parts[2]))
-        }
-        
-        return(NA_character_)
-    })
-    
-    out
-}
-
-quote_newick_label <- function(x) {
-    x <- as.character(x)
-    
-    # Newick-safe labels can be unquoted.
-    safe <- str_detect(x, "^[A-Za-z0-9_.|+-]+$")
-    
-    x2 <- x
-    x2[!safe] <- paste0("'", str_replace_all(x2[!safe], "'", "''"), "'")
-    x2
-}
-
-strip_tree_edge_length <- function(tree) {
+.tree_extension_strip_edge_length <- function(tree) {
     tree$edge.length <- NULL
     tree
 }
 
-# Convert ape tree to Newick body, replacing tip labels by custom strings.
-# replacement is a named vector/list:
-#   names = phylum labels in backbone tree
-#   values = sequence clades, e.g. "(seq1,seq2,seq3)"
-tree_to_newick_body <- function(tree, replacement = NULL) {
-    n_tip <- length(tree$tip.label)
-    root_node <- n_tip + 1
-    
-    children <- split(tree$edge[, 2], tree$edge[, 1])
-    
-    rec <- function(node) {
-        if (node <= n_tip) {
-            lab <- tree$tip.label[node]
-            
-            if (!is.null(replacement) && lab %in% names(replacement)) {
-                return(replacement[[lab]])
-            } else {
-                return(quote_newick_label(lab))
-            }
-        }
-        
-        ch <- children[[as.character(node)]]
-        paste0("(", paste(map_chr(ch, rec), collapse = ","), ")")
-    }
-    
-    rec(root_node)
-}
-
-make_seq_clade <- function(ids) {
-    ids <- unique(as.character(ids))
-    ids <- ids[!is.na(ids) & ids != ""]
-    ids <- sort(ids)
-    
-    if (length(ids) == 0) {
-        return(NA_character_)
-    }
-    
-    if (length(ids) == 1) {
-        return(quote_newick_label(ids))
-    }
-    
-    paste0("(", paste(quote_newick_label(ids), collapse = ","), ")")
-}
-
-normalize_tree_tip_labels <- function(tree) {
-    tree$tip.label <- clean_rank_name(tree$tip.label)
+.tree_extension_normalize_tree_tips <- function(tree) {
+    tree$tip.label <- .tree_extension_clean_rank_name(tree$tip.label)
     tree
 }
 
-# -----------------------------
-# 3. Read query sequence lineage
-# -----------------------------
-
-query_tbl <- readr::read_tsv(query_lineage_file, show_col_types = FALSE)
-
-if (!all(c("seq_id", "lineage") %in% colnames(query_tbl))) {
-    stop("query_lineage.tsv must contain columns: seq_id, lineage")
-}
-
-query_tbl <- query_tbl %>%
-    transmute(
-        seq_id = as.character(seq_id),
-        lineage = as.character(lineage),
-        phylum = extract_phylum(lineage)
-    ) %>%
-    filter(!is.na(seq_id), seq_id != "") %>%
-    filter(!is.na(phylum), phylum != "", phylum != "NA")
-
-if (nrow(query_tbl) == 0) {
-    stop("No valid query sequences with phylum found.")
-}
-
-readr::write_tsv(query_tbl, out_phylum_map)
-
-seq_by_phylum <- split(query_tbl$seq_id, query_tbl$phylum)
-
-query_phyla <- sort(names(seq_by_phylum))
-
-message("[INFO] Query sequences: ", nrow(query_tbl))
-message("[INFO] Query phyla: ", paste(query_phyla, collapse = ", "))
-
-# Sequence clade for each query phylum
-phylum_to_seq_clade <- map_chr(seq_by_phylum, make_seq_clade)
-
-# -----------------------------
-# 4. Read reference tree
-# -----------------------------
-
-ref_tree <- read.tree(ref_tree_file)
-ref_tree <- strip_tree_edge_length(ref_tree)
-
-if (is.na(ref_lineage_file)) {
-    # ----------------------------------------------------------
-    # Case A:
-    # Reference tree tips are already phylum names.
-    # ----------------------------------------------------------
-    
-    message("[INFO] Reference tree is treated as phylum-level tree.")
-    
-    ref_tree <- normalize_tree_tip_labels(ref_tree)
-    
-    ref_phyla <- sort(ref_tree$tip.label)
-    
-    common_phyla <- intersect(query_phyla, ref_phyla)
-    missing_phyla <- setdiff(query_phyla, ref_phyla)
-    
-    if (length(common_phyla) == 0) {
-        stop("No shared phyla between query data and reference phylum tree.")
+.tree_extension_make_seq_clade <- function(ids) {
+    ids <- sort(unique(as.character(ids)))
+    ids <- ids[!is.na(ids) & ids != ""]
+    if (length(ids) == 0L) {
+        return(NA_character_)
     }
-    
-    if (length(missing_phyla) > 0) {
-        msg <- paste0(
-            "These query phyla are missing from reference tree: ",
-            paste(missing_phyla, collapse = ", ")
-        )
-        
-        if (strict_ref_phylum) {
-            stop(msg)
-        } else {
-            warning(msg, "\nThey will be added as unresolved clades at the root.")
+    labels <- .tree_extension_quote_newick_label(ids)
+    if (length(labels) == 1L) {
+        return(labels)
+    }
+    paste0("(", paste(labels, collapse = ","), ")")
+}
+
+.tree_extension_tree_to_newick_body <- function(tree, replacement = NULL) {
+    n_tip <- length(tree$tip.label)
+    root_node <- n_tip + 1L
+    children <- split(tree$edge[, 2L], tree$edge[, 1L])
+
+    recurse <- function(node) {
+        if (node <= n_tip) {
+            label <- tree$tip.label[node]
+            if (!is.null(replacement) && label %in% names(replacement)) {
+                return(replacement[[label]])
+            }
+            return(.tree_extension_quote_newick_label(label))
         }
-    }
-    
-    phylum_tree <- keep.tip(ref_tree, common_phyla)
-    phylum_tree <- strip_tree_edge_length(phylum_tree)
-    
-} else {
-    # ----------------------------------------------------------
-    # Case B:
-    # Reference tree tips are taxon names.
-    # Use ref_lineage.tsv to map reference tips to phylum.
-    # ----------------------------------------------------------
-    
-    message("[INFO] Reference tree is treated as taxon-level tree.")
-    message("[INFO] Reference lineage file: ", ref_lineage_file)
-    
-    ref_tax <- readr::read_tsv(ref_lineage_file, show_col_types = FALSE)
-    
-    if (!all(c("taxon", "lineage") %in% colnames(ref_tax))) {
-        stop("ref_lineage.tsv must contain columns: taxon, lineage")
-    }
-    
-    ref_tax <- ref_tax %>%
-        transmute(
-            taxon_raw = as.character(taxon),
-            taxon = clean_rank_name(taxon),
-            lineage = as.character(lineage),
-            phylum = extract_phylum(lineage)
-        ) %>%
-        filter(!is.na(taxon), taxon != "") %>%
-        filter(!is.na(phylum), phylum != "", phylum != "NA")
-    
-    ref_tree <- normalize_tree_tip_labels(ref_tree)
-    
-    ref_tax <- ref_tax %>%
-        filter(taxon %in% ref_tree$tip.label)
-    
-    if (nrow(ref_tax) == 0) {
-        stop("No ref_lineage.tsv taxon names match ref.tree tip labels.")
-    }
-    
-    common_phyla <- intersect(query_phyla, unique(ref_tax$phylum))
-    missing_phyla <- setdiff(query_phyla, unique(ref_tax$phylum))
-    
-    if (length(common_phyla) == 0) {
-        stop("No shared phyla between query data and reference taxonomy.")
-    }
-    
-    if (length(missing_phyla) > 0) {
-        msg <- paste0(
-            "These query phyla are missing from reference taxonomy/tree: ",
-            paste(missing_phyla, collapse = ", ")
-        )
-        
-        if (strict_ref_phylum) {
-            stop(msg)
-        } else {
-            warning(msg, "\nThey will be added as unresolved clades at the root.")
-        }
-    }
-    
-    # Check phylum monophyly in reference tree.
-    mono_check <- map_dfr(common_phyla, function(p) {
-        tips <- ref_tax %>%
-            filter(phylum == p) %>%
-            pull(taxon) %>%
-            unique()
-        
-        tips <- intersect(tips, ref_tree$tip.label)
-        
-        tibble(
-            phylum = p,
-            n_ref_tips = length(tips),
-            is_monophyletic = if_else(
-                length(tips) >= 2,
-                is.monophyletic(ref_tree, tips),
-                NA
-            )
-        )
-    })
-    
-    readr::write_tsv(mono_check, "reference_phylum_monophyly_check.tsv")
-    
-    bad_mono <- mono_check %>%
-        filter(n_ref_tips >= 2, is_monophyletic == FALSE)
-    
-    if (nrow(bad_mono) > 0) {
-        warning(
-            "Some phyla are not monophyletic in the reference tree: ",
-            paste(bad_mono$phylum, collapse = ", "),
-            "\nThe script will still choose one representative tip per phylum to inherit backbone topology."
+        child_nodes <- children[[as.character(node)]]
+        paste0(
+            "(",
+            paste(vapply(child_nodes, recurse, character(1)), collapse = ","),
+            ")"
         )
     }
-    
-    # Use one representative tip per phylum.
-    # If each phylum is monophyletic, any representative preserves phylum-level backbone.
-    rep_tbl <- ref_tax %>%
-        filter(phylum %in% common_phyla) %>%
-        group_by(phylum) %>%
-        summarise(
-            representative_tip = sort(unique(taxon))[1],
-            n_ref_tips = n_distinct(taxon),
-            .groups = "drop"
-        )
-    
-    rep_tips <- rep_tbl$representative_tip
-    
-    phylum_tree <- keep.tip(ref_tree, rep_tips)
-    phylum_tree <- strip_tree_edge_length(phylum_tree)
-    
-    # Rename representative species/taxon tips to phylum names.
-    tip_map <- setNames(rep_tbl$phylum, rep_tbl$representative_tip)
-    phylum_tree$tip.label <- tip_map[phylum_tree$tip.label]
+
+    recurse(root_node)
 }
 
-# -----------------------------
-# 5. Save reference phylum backbone
-# -----------------------------
-
-write.tree(phylum_tree, file = out_ref_backbone)
-message("[DONE] ", out_ref_backbone)
-
-# -----------------------------
-# 6. Replace phylum tips by query seq_id clades
-# -----------------------------
-
-backbone_phyla <- phylum_tree$tip.label
-
-replacement <- phylum_to_seq_clade[backbone_phyla]
-names(replacement) <- backbone_phyla
-
-constraint_body <- tree_to_newick_body(phylum_tree, replacement = replacement)
-
-# Add missing query phyla as unresolved clades at the root.
-missing_in_backbone <- setdiff(query_phyla, backbone_phyla)
-
-if (length(missing_in_backbone) > 0) {
-    missing_clades <- phylum_to_seq_clade[missing_in_backbone]
-    constraint_body <- paste0(
-        "(",
-        constraint_body,
-        ",",
-        paste(missing_clades, collapse = ","),
-        ")"
+.tree_extension_handle_missing_phyla <- function(
+        missing_phyla,
+        strict_ref_phylum,
+        reference_description
+) {
+    if (length(missing_phyla) == 0L) {
+        return(invisible(NULL))
+    }
+    message_text <- paste0(
+        "These query phyla are missing from the ", reference_description, ": ",
+        paste(missing_phyla, collapse = ", ")
+    )
+    if (strict_ref_phylum) {
+        stop(message_text, call. = FALSE)
+    }
+    warning(
+        message_text,
+        ". They will be added as unresolved clades at the root.",
+        call. = FALSE
     )
 }
-
-constraint_tree <- paste0(constraint_body, ";")
-
-writeLines(constraint_tree, out_constraint_tree)
-
-message("[DONE] ", out_constraint_tree)
-
-# -----------------------------
-# 7. Report
-# -----------------------------
-
-cat("\n========== Summary ==========\n")
-cat("Query sequences: ", nrow(query_tbl), "\n", sep = "")
-cat("Query phyla: ", length(query_phyla), "\n", sep = "")
-cat("Backbone phyla: ", length(backbone_phyla), "\n", sep = "")
-cat("Missing phyla added at root: ", length(missing_in_backbone), "\n", sep = "")
-
-if (length(missing_in_backbone) > 0) {
-    cat("Missing phyla: ", paste(missing_in_backbone, collapse = ", "), "\n", sep = "")
-}
-
-cat("\nUse in IQ-TREE:\n")
-cat("iqtree2 -s aln.fa -m MFP -g ", out_constraint_tree, " -B 1000 -T AUTO --prefix constrained\n", sep = "")
