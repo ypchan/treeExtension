@@ -2,32 +2,87 @@
 % Please edit documentation in R/make_binary_iqtree.R
 \name{make_binary_iqtree}
 \alias{make_binary_iqtree}
-\title{Make a rooted binary IQ-TREE by splitting the outgroup branch equally}
+\title{Rebuild a rooted binary IQ-TREE by splitting the outgroup branch equally}
 \usage{
-make_binary_iqtree(tre_path, out_lbl)
+make_binary_iqtree(
+  tree,
+  outgroup_label,
+  digits = 8,
+  return = c("treedata", "newick", "phylo"),
+  write = FALSE,
+  file = NULL,
+  overwrite = FALSE,
+  preserve_data = TRUE,
+  verbose = FALSE
+)
 }
 \arguments{
-\item{tre_path}{Character, path to the input Newick tree file.}
+\item{tree}{A path to a tree file, a \code{phylo} object, or a \code{treedata} object.}
 
-\item{out_lbl}{Character, the exact outgroup tip label to split on.}
+\item{outgroup_label}{Character scalar. Exact tip label of the outgroup.}
+
+\item{digits}{Integer scalar. Number of decimal places used when formatting
+branch lengths. Default: 8.}
+
+\item{return}{Character scalar. One of \code{"treedata"}, \code{"newick"}, or \code{"phylo"}.
+Default: \code{"treedata"}.}
+
+\item{write}{Logical. If \code{TRUE}, write the rebuilt tree to disk.
+Default: \code{FALSE}.}
+
+\item{file}{Optional output file path when \code{write = TRUE}.}
+
+\item{overwrite}{Logical. If \code{FALSE}, error if \code{file} already exists.
+Default: \code{FALSE}.}
+
+\item{preserve_data}{Logical. Reserved for future richer \code{treedata} support.
+The current implementation rebuilds topology and branch lengths, but does
+not reattach auxiliary node or tip annotations after topology changes.}
+
+\item{verbose}{Logical. If \code{TRUE}, print progress messages.
+Default: \code{FALSE}.}
 }
 \value{
-Invisibly returns the output file path; writes a
-\verb{*.bi.treefile} next to the input file.
+Depending on \code{return}, one of:
+\itemize{
+\item a \code{treeio::treedata} object
+\item a Newick string
+\item a \code{phylo} object
+}
+
+If \code{write = TRUE}, the rebuilt tree is also written to disk.
 }
 \description{
-Read a Newick tree file produced by IQ-TREE, locate an outgroup tip by its
-label, extract its pendant branch length \code{L}, remove the original occurrence,
-and output a new binary tree \verb{(<ingroup>:L/2,<outgroup>:L/2);}.
+Rebuild a rooted binary tree by identifying a specified outgroup tip,
+extracting its original pendant branch length \code{L}, removing its original
+occurrence from the ingroup backbone, and rebuilding the root as
+\verb{(<ingroup>:L/2,<outgroup>:L/2);}.
+
+The function accepts a file path, a \code{phylo} object, or a \code{treedata} object.
+By default it returns a \code{treedata} object. Writing to disk is optional.
 }
 \details{
-This function expects the outgroup label to be present exactly once and its
-pendant branch length to be of the form \verb{:0.xxx}. The removal tries both
-\verb{,label:L} and \verb{label:L,}. If neither matches, it errors with a diagnostic.
+The outgroup tip must be attached directly to the current root, and the
+outgroup branch must have a finite, non-negative branch length. This keeps the
+operation explicit: the function does not search for or reroot by an
+outgroup elsewhere in the tree.
 }
 \examples{
 \dontrun{
-make_binary_iqtree("example.treefile", "Outgroup_Sp")
+td2 <- make_binary_iqtree("example.treefile", "Outgroup_Sp")
+
+nwk <- make_binary_iqtree(
+  "example.treefile",
+  "Outgroup_Sp",
+  return = "newick"
+)
+
+make_binary_iqtree(
+  "example.treefile",
+  "Outgroup_Sp",
+  write = TRUE,
+  file = "example.bi.treefile"
+)
 }
 
 }
